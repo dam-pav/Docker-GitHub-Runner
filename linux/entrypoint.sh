@@ -273,20 +273,25 @@ else
   COMBINED_LABELS="${HARD_LABELS}"
 fi
 
-# Best-effort delete stale runners by name (before re-register). When switching
-# from one runner to multiple instances, no instance will have the old
-# unsuffixed name, so clean up that legacy registration as well.
-STALE_RUNNER_NAMES=("$RUNNER_NAME")
-if [ "${RUNNER_INSTANCES:-1}" -gt 1 ] && [ "$BASE_RUNNER_NAME" != "$RUNNER_NAME" ]; then
-  STALE_RUNNER_NAMES+=("$BASE_RUNNER_NAME")
-fi
+# Best-effort delete stale runner registrations before re-registering. Also
+# prune names above the configured instance count so a scale-down can recover
+# registrations left behind if a removed container did not unregister cleanly.
 set +e
 stale_ids=""
 page=1
 while :; do
   list_resp=$(http_get_json "${API_LIST_URL}?per_page=100&page=${page}" 2>/dev/null)
-  page_ids=$(echo "${list_resp:-}" | jq -r --argjson names "$(printf '%s\n' "${STALE_RUNNER_NAMES[@]}" | jq -R . | jq -s .)" \
-    '.runners[]? | select(.name as $name | $names | index($name)) | .id' 2>/dev/null || true)
+  page_ids=$(echo "${list_resp:-}" | jq -r \
+    --arg base "$BASE_RUNNER_NAME" \
+    --arg active "$RUNNER_NAME" \
+    --argjson instances "$RUNNER_INSTANCES" \
+    '.runners[]? | .name as $name | select(
+      $name == $active or
+      ($instances > 1 and $name == $base) or
+      (($name | startswith($base + "_")) and
+       (($name | ltrimstr($base + "_")) | test("^[0-9]+$")) and
+       ((($name | ltrimstr($base + "_")) | tonumber) > $instances))
+    ) | .id' 2>/dev/null || true)
   if [ -n "$page_ids" ]; then
     stale_ids="${stale_ids}${page_ids}"$'\n'
   fi
