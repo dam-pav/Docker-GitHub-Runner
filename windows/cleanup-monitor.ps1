@@ -191,7 +191,8 @@ $secretsFile = 'C:\run\secrets\credentials'
 if (Test-Path -LiteralPath $secretsFile -PathType Leaf) {
     $credentialLines = @(Get-Content -LiteralPath $secretsFile |
         ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') })
-    $tokenLine = @($credentialLines | Where-Object { $_ -match '^GITHUB_TOKEN\s*[:=]' } | Select-Object -Last 1)[0]
+    $tokenLines = @($credentialLines | Where-Object { $_ -match '^GITHUB_TOKEN\s*[:=]' })
+    $tokenLine = if ($tokenLines.Count -gt 0) { $tokenLines[-1] } else { $null }
     if ($null -ne $tokenLine) {
         $env:GITHUB_TOKEN = ($tokenLine -replace '^\s*GITHUB_TOKEN\s*[:=]\s*', '').Trim()
     }
