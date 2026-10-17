@@ -235,6 +235,34 @@ function Invoke-GitHubApi {
     }
 }
 
+function Invoke-GitHubPublicApi {
+    param(
+        [Parameter(Mandatory)][string] $Uri,
+        [switch] $Retry
+    )
+
+    $headers = @{
+        Accept                 = 'application/vnd.github+json'
+        'X-GitHub-Api-Version' = '2022-11-28'
+        'User-Agent'           = 'docker-github-runner'
+    }
+    $attempts = if ($Retry) { [int](Get-EnvironmentValue GH_API_RETRIES '6') } else { 1 }
+    $delay = [int](Get-EnvironmentValue GH_API_INITIAL_DELAY '1')
+    $backoff = [int](Get-EnvironmentValue GH_API_BACKOFF_MULT '2')
+
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        try {
+            return Invoke-RestMethod -Method GET -Uri $Uri -Headers $headers
+        }
+        catch {
+            if ($attempt -eq $attempts) { throw }
+            Write-Log "Public GitHub API request failed (attempt $attempt/$attempts); retrying in $delay second(s)"
+            Start-Sleep -Seconds $delay
+            $delay *= $backoff
+        }
+    }
+}
+
 function Invoke-RunnerCommand {
     param(
         [Parameter(Mandatory)][string] $Command,
@@ -405,11 +433,13 @@ try {
         throw "RUNNER_WORKDIR must be '$expectedWorkDirectory' for same-path workspace isolation"
     }
 
-    Write-Log 'Determining runner asset (win x64) from public GitHub Releases API'
-    $release = Invoke-RestMethod -Method GET -Uri 'https://api.github.com/repos/actions/runner/releases/latest' -Headers @{
-        Accept = 'application/vnd.github+json'
-        'X-GitHub-Api-Version' = '2022-11-28'
-        'User-Agent' = 'docker-github-runner'
+    Write-Log 'Determining runner asset (win x64) from GitHub Releases API'
+    try {
+        $release = Invoke-GitHubApi -Method GET -Uri 'https://api.github.com/repos/actions/runner/releases/latest' -Retry
+    }
+    catch {
+        Write-Log 'Authenticated release lookup was unavailable; retrying without authentication'
+        $release = Invoke-GitHubPublicApi -Uri 'https://api.github.com/repos/actions/runner/releases/latest' -Retry
     }
     $runnerAsset = $release.assets |
         Where-Object name -Match '^actions-runner-win-x64-.*\.zip$' |

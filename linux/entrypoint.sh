@@ -23,6 +23,13 @@ http_get_json() {
     "$url"
 }
 
+http_get_public_json() {
+  local url="$1"
+  curl -fsS \
+    -H "Accept: application/vnd.github+json" \
+    "$url"
+}
+
 http_post_json() {
   local url="$1"
   curl -fsS -X POST \
@@ -51,6 +58,8 @@ with_retries_json() {
     set +e
     if [ "$method" = "GET" ]; then
       resp=$(http_get_json "$url" 2>/dev/null)
+    elif [ "$method" = "PUBLIC_GET" ]; then
+      resp=$(http_get_public_json "$url" 2>/dev/null)
     else
       resp=$(http_post_json "$url" 2>/dev/null)
     fi
@@ -201,8 +210,12 @@ fi
 # -------------------------
 # Download/refresh runner if needed
 # -------------------------
-log "Determining runner asset (linux x64) from public GitHub Releases API"
-release_resp=$(curl -fsS "https://api.github.com/repos/actions/runner/releases/latest")
+RELEASE_API_URL="https://api.github.com/repos/actions/runner/releases/latest"
+log "Determining runner asset (linux x64) from GitHub Releases API"
+release_resp=$(with_retries_json GET "$RELEASE_API_URL") || {
+  log "Authenticated release lookup was unavailable; retrying without authentication"
+  release_resp=$(with_retries_json PUBLIC_GET "$RELEASE_API_URL")
+}
 RUNNER_URL_DL=$(echo "$release_resp" | jq -r '.assets[] | select(.name|test("linux-x64")) | .browser_download_url' | head -n1)
 RUNNER_TAR=$(echo "$release_resp" | jq -r '.assets[] | select(.name|test("linux-x64")) | .name' | head -n1)
 
