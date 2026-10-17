@@ -164,6 +164,7 @@ if ! [[ "${RUNNER_INSTANCES:-1}" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
+BASE_RUNNER_NAME="$RUNNER_NAME"
 if [ "${RUNNER_INSTANCES:-1}" -gt 1 ]; then
   RUNNER_ID=$(docker inspect \
     --format '{{ index .Config.Labels "com.docker.compose.container-number" }}' \
@@ -272,13 +273,21 @@ else
   COMBINED_LABELS="${HARD_LABELS}"
 fi
 
-# Best-effort delete stale runners by name (before re-register)
+# Best-effort delete stale runners by name (before re-register). When switching
+# from one runner to multiple instances, no instance will have the old
+# unsuffixed name, so clean up that legacy registration as well.
+STALE_RUNNER_NAMES=("$RUNNER_NAME")
+if [ "${RUNNER_INSTANCES:-1}" -gt 1 ] && [ "$BASE_RUNNER_NAME" != "$RUNNER_NAME" ]; then
+  STALE_RUNNER_NAMES+=("$BASE_RUNNER_NAME")
+fi
 set +e
 list_resp=$(http_get_json "$API_LIST_URL" 2>/dev/null)
 set -e
-stale_ids=$(echo "${list_resp:-}" | jq -r ".runners[]? | select(.name==\"${RUNNER_NAME}\") | .id" 2>/dev/null || true)
-for id in $stale_ids; do
-  http_delete "${API_DELETE_PREFIX}/${id}" || true
+for stale_name in "${STALE_RUNNER_NAMES[@]}"; do
+  stale_ids=$(echo "${list_resp:-}" | jq -r --arg name "$stale_name" '.runners[]? | select(.name==$name) | .id' 2>/dev/null || true)
+  for id in $stale_ids; do
+    http_delete "${API_DELETE_PREFIX}/${id}" || true
+  done
 done
 
 # -------------------------
