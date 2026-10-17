@@ -154,7 +154,9 @@ sudo chown root:root $LOC/credentials
 sudo chmod 755 $LOC
 ```
 
-When the credentials file is present and contains a `GITHUB_TOKEN` entry, its value takes priority over any `GITHUB_TOKEN` environment variable and the env var can be left empty or omitted entirely.
+The credentials file can contain either a raw token on one line or a `GITHUB_TOKEN=...` / `GITHUB_TOKEN: ...` entry. A value in the file takes priority over the `GITHUB_TOKEN` environment variable, which can be left empty or omitted entirely.
+
+At startup, the runner logs whether the credentials file was found, readable, and parsed. It never prints the full token. It then checks token authentication with GitHub and reports an HTTP status when authentication fails. A successful authentication check confirms the token is accepted; runner registration still requires the repository or organization permissions described above.
 
 While `/etc/github-runner` is the default host location, you can specify a different location with the environment variable `HOST_CRED_LOCATION`. Adjust LOC in the above script to match.
 

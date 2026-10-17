@@ -327,22 +327,60 @@ function Remove-RunnerRegistration {
 try {
     $secretsFile = 'C:\run\secrets\credentials'
     if (Test-Path -LiteralPath $secretsFile -PathType Leaf) {
-        $tokenLine = Get-Content -LiteralPath $secretsFile |
-            Where-Object { $_ -match '^\s*GITHUB_TOKEN\s*[:=]' } |
-            Select-Object -Last 1
+        Write-Log "Credentials file exists at $secretsFile"
+        try {
+            $credentialLines = @(Get-Content -LiteralPath $secretsFile -ErrorAction Stop |
+                ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') })
+        }
+        catch {
+            throw "Credentials file exists but cannot be read: $($_.Exception.Message)"
+        }
+        $tokenLine = @($credentialLines | Where-Object { $_ -match '^GITHUB_TOKEN\s*[:=]' } | Select-Object -Last 1)[0]
         if ($null -ne $tokenLine) {
-            $env:GITHUB_TOKEN = ($tokenLine -replace '^\s*GITHUB_TOKEN\s*[:=]\s*', '').Trim()
+            $env:GITHUB_TOKEN = ($tokenLine -replace '^GITHUB_TOKEN\s*[:=]\s*', '').Trim()
+        }
+        elseif ($credentialLines.Count -eq 1) {
+            $env:GITHUB_TOKEN = $credentialLines[0]
+        }
+        elseif ($credentialLines.Count -gt 1) {
+            throw 'Credentials file has multiple unrecognized lines; expected GITHUB_TOKEN=value or a single raw token'
+        }
+        if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
             Write-Log "Using GITHUB_TOKEN from $secretsFile (masked: $(Get-MaskedToken $env:GITHUB_TOKEN))"
+        }
+        else {
+            Write-Log 'Credentials file is empty or has no GITHUB_TOKEN value; using the environment variable if provided'
         }
     }
     else {
-        Write-Log "No credentials file at $secretsFile; using the environment variable if provided"
+        Write-Log "Credentials file not found at $secretsFile; using the environment variable if provided"
     }
 
     foreach ($requiredVariable in 'GITHUB_TOKEN', 'REPO_URL', 'RUNNER_NAME') {
         if ([string]::IsNullOrWhiteSpace((Get-EnvironmentValue $requiredVariable))) {
             throw "$requiredVariable must be set"
         }
+    }
+
+    Write-Log 'Checking GitHub token authentication'
+    try {
+        Invoke-RestMethod -Method GET -Uri 'https://api.github.com/user' -Headers @{
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+            'User-Agent' = 'docker-github-runner'
+        } | Out-Null
+        Write-Log 'GitHub token authentication succeeded'
+    }
+    catch {
+        $statusCode = if ($null -ne $_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+        if ($statusCode -eq 401) {
+            throw 'GitHub rejected GITHUB_TOKEN (HTTP 401); check the token value and expiration'
+        }
+        if ($statusCode -eq 0) {
+            throw 'Could not contact GitHub to validate GITHUB_TOKEN; check network access'
+        }
+        throw "GitHub token validation returned HTTP $statusCode; check network access and token configuration"
     }
 
     Set-RunnerInstanceName

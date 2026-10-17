@@ -108,21 +108,31 @@ fi
 # Read GITHUB_TOKEN from secret file (if present)
 # -------------------------
 SECRETS_FILE="/run/secrets/credentials"
-if [ -e "${SECRETS_FILE}" ] && [ -f "${SECRETS_FILE}" ] && [ -r "${SECRETS_FILE}" ] && [ -s "${SECRETS_FILE}" ]; then
-  token_from_file=$(
-    grep -E '^[[:space:]]*GITHUB_TOKEN[[:space:]]*[:=]' "${SECRETS_FILE}" 2>/dev/null \
-      | sed -E 's/^[[:space:]]*GITHUB_TOKEN[[:space:]]*[:=][[:space:]]*//' \
-      | tr -d '\r' \
-      | tail -n1 \
-      || true
-  )
-  if [ -n "${token_from_file:-}" ]; then
-    token_from_file=$(echo "${token_from_file}" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
-    export GITHUB_TOKEN="${token_from_file}"
-    log "Using GITHUB_TOKEN from ${SECRETS_FILE} (masked: $(mask_token "$GITHUB_TOKEN"))"
+if [ -e "${SECRETS_FILE}" ]; then
+  log "Credentials file exists at ${SECRETS_FILE}"
+  if [ ! -f "${SECRETS_FILE}" ]; then
+    log "Credentials path is not a regular file; using the environment variable if provided"
+  elif [ ! -r "${SECRETS_FILE}" ]; then
+    log "Credentials file is not readable; using the environment variable if provided"
+  else
+    token_from_file=$(awk '
+      { sub(/\r$/, ""); line=$0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line) }
+      line == "" || line ~ /^#/ { next }
+      line ~ /^GITHUB_TOKEN[[:space:]]*[:=]/ { sub(/^GITHUB_TOKEN[[:space:]]*[:=][[:space:]]*/, "", line); keyed=line; next }
+      { if (raw == "") raw=line; else raw="__multiple_lines__" }
+      END { if (keyed != "") print keyed; else if (raw != "") print raw }
+    ' "${SECRETS_FILE}")
+    if [ -n "${token_from_file:-}" ] && [ "${token_from_file}" != "__multiple_lines__" ]; then
+      export GITHUB_TOKEN="${token_from_file}"
+      log "Parsed GITHUB_TOKEN from ${SECRETS_FILE} (masked: $(mask_token "$GITHUB_TOKEN"))"
+    elif [ "${token_from_file:-}" = "__multiple_lines__" ]; then
+      log "Credentials file contains multiple unrecognized lines; expected GITHUB_TOKEN=value or a single raw token"
+    else
+      log "Credentials file is empty or has no GITHUB_TOKEN value; using the environment variable if provided"
+    fi
   fi
 else
-  log "No usable credentials file at ${SECRETS_FILE}; will use env var if provided"
+  log "Credentials file not found at ${SECRETS_FILE}; using the environment variable if provided"
 fi
 
 if [ -z "${GITHUB_TOKEN:-}" ]; then
@@ -137,6 +147,24 @@ fi
 
 if [ -z "${RUNNER_NAME:-}" ]; then
   echo "ERROR: RUNNER_NAME must be set and unique (no default)" >&2
+  exit 1
+fi
+
+log "Checking GitHub token authentication"
+token_status=$(curl -sS -o /dev/null -w '%{http_code}' \
+  -H "Authorization: token ${GITHUB_TOKEN}" \
+  -H "Accept: application/vnd.github+json" \
+  https://api.github.com/user 2>/dev/null || true)
+if [ "${token_status}" = "200" ]; then
+  log "GitHub token authentication succeeded"
+elif [ "${token_status}" = "401" ]; then
+  echo "ERROR: GitHub rejected GITHUB_TOKEN (HTTP 401); check the token value and expiration" >&2
+  exit 1
+elif [ -z "${token_status}" ] || [ "${token_status}" = "000" ]; then
+  echo "ERROR: Could not contact GitHub to validate GITHUB_TOKEN" >&2
+  exit 1
+else
+  echo "ERROR: GitHub token validation returned HTTP ${token_status}; check network access and token configuration" >&2
   exit 1
 fi
 
