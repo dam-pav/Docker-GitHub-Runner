@@ -362,27 +362,6 @@ try {
         }
     }
 
-    Write-Log 'Checking GitHub token authentication'
-    try {
-        Invoke-RestMethod -Method GET -Uri 'https://api.github.com/user' -Headers @{
-            Authorization = "Bearer $env:GITHUB_TOKEN"
-            Accept = 'application/vnd.github+json'
-            'X-GitHub-Api-Version' = '2022-11-28'
-            'User-Agent' = 'docker-github-runner'
-        } | Out-Null
-        Write-Log 'GitHub token authentication succeeded'
-    }
-    catch {
-        $statusCode = if ($null -ne $_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-        if ($statusCode -eq 401) {
-            throw 'GitHub rejected GITHUB_TOKEN (HTTP 401); check the token value and expiration'
-        }
-        if ($statusCode -eq 0) {
-            throw 'Could not contact GitHub to validate GITHUB_TOKEN; check network access'
-        }
-        throw "GitHub token validation returned HTTP $statusCode; check network access and token configuration"
-    }
-
     Set-RunnerInstanceName
     $env:RUNNER_WORKDIR = "_work\$env:RUNNER_NAME"
     $env:TEMP = "C:\actions-runner\_work\$env:RUNNER_NAME\_temp"
@@ -426,8 +405,12 @@ try {
         throw "RUNNER_WORKDIR must be '$expectedWorkDirectory' for same-path workspace isolation"
     }
 
-    Write-Log 'Determining runner asset (win x64) from GitHub Releases API'
-    $release = Invoke-GitHubApi -Method GET -Uri 'https://api.github.com/repos/actions/runner/releases/latest' -Retry
+    Write-Log 'Determining runner asset (win x64) from public GitHub Releases API'
+    $release = Invoke-RestMethod -Method GET -Uri 'https://api.github.com/repos/actions/runner/releases/latest' -Headers @{
+        Accept = 'application/vnd.github+json'
+        'X-GitHub-Api-Version' = '2022-11-28'
+        'User-Agent' = 'docker-github-runner'
+    }
     $runnerAsset = $release.assets |
         Where-Object name -Match '^actions-runner-win-x64-.*\.zip$' |
         Select-Object -First 1
@@ -468,8 +451,17 @@ try {
         }
     }
 
-    Write-Log "Requesting registration token from GitHub API ($apiRegistrationUrl)"
-    $registration = Invoke-GitHubApi -Method POST -Uri $apiRegistrationUrl -Retry
+    Write-Log "Checking GITHUB_TOKEN authentication and permissions while requesting registration token ($apiRegistrationUrl)"
+    try {
+        $registration = Invoke-GitHubApi -Method POST -Uri $apiRegistrationUrl -Retry
+    }
+    catch {
+        $statusCode = if ($null -ne $_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+        if ($statusCode -gt 0) {
+            throw "GitHub registration-token request failed (HTTP $statusCode); check GITHUB_TOKEN validity, scope, and repository or organization access"
+        }
+        throw "GitHub registration-token request failed; check GITHUB_TOKEN validity, permissions, and network access: $($_.Exception.Message)"
+    }
     if ([string]::IsNullOrWhiteSpace($registration.token)) { throw 'GitHub returned an empty registration token' }
     Write-Log "Obtained registration token (masked: $(Get-MaskedToken $registration.token)); expires at $($registration.expires_at)"
 

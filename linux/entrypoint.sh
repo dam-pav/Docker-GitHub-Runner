@@ -150,24 +150,6 @@ if [ -z "${RUNNER_NAME:-}" ]; then
   exit 1
 fi
 
-log "Checking GitHub token authentication"
-token_status=$(curl -sS -o /dev/null -w '%{http_code}' \
-  -H "Authorization: token ${GITHUB_TOKEN}" \
-  -H "Accept: application/vnd.github+json" \
-  https://api.github.com/user 2>/dev/null || true)
-if [ "${token_status}" = "200" ]; then
-  log "GitHub token authentication succeeded"
-elif [ "${token_status}" = "401" ]; then
-  echo "ERROR: GitHub rejected GITHUB_TOKEN (HTTP 401); check the token value and expiration" >&2
-  exit 1
-elif [ -z "${token_status}" ] || [ "${token_status}" = "000" ]; then
-  echo "ERROR: Could not contact GitHub to validate GITHUB_TOKEN" >&2
-  exit 1
-else
-  echo "ERROR: GitHub token validation returned HTTP ${token_status}; check network access and token configuration" >&2
-  exit 1
-fi
-
 if ! [[ "${RUNNER_INSTANCES:-1}" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: RUNNER_INSTANCES must be a natural number (1 or greater)" >&2
   exit 1
@@ -219,8 +201,8 @@ fi
 # -------------------------
 # Download/refresh runner if needed
 # -------------------------
-log "Determining runner asset (linux x64) from GitHub Releases API"
-release_resp=$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" "https://api.github.com/repos/actions/runner/releases/latest")
+log "Determining runner asset (linux x64) from public GitHub Releases API"
+release_resp=$(curl -fsS "https://api.github.com/repos/actions/runner/releases/latest")
 RUNNER_URL_DL=$(echo "$release_resp" | jq -r '.assets[] | select(.name|test("linux-x64")) | .browser_download_url' | head -n1)
 RUNNER_TAR=$(echo "$release_resp" | jq -r '.assets[] | select(.name|test("linux-x64")) | .name' | head -n1)
 
@@ -256,13 +238,13 @@ fi
 # -------------------------
 # Register token
 # -------------------------
-log "Requesting registration token from GitHub API (${API_REG_URL})"
+log "Checking GITHUB_TOKEN authentication and permissions while requesting registration token (${API_REG_URL})"
 resp=$(with_retries_json POST "$API_REG_URL") || true
 TOKEN_TO_USE=$(echo "${resp:-}" | jq -r '.token' 2>/dev/null || true)
 expires_at=$(echo "${resp:-}" | jq -r '.expires_at' 2>/dev/null || true)
 
 if [ -z "${TOKEN_TO_USE:-}" ] || [ "${TOKEN_TO_USE}" = "null" ]; then
-  echo "ERROR: Failed to obtain registration token. Response:" >&2
+  echo "ERROR: Failed to obtain registration token; check GITHUB_TOKEN validity, scope, and network access. Response:" >&2
   echo "${resp:-<empty>}" >&2
   exit 1
 fi
