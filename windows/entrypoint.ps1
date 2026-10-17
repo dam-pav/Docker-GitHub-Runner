@@ -235,6 +235,34 @@ function Invoke-GitHubApi {
     }
 }
 
+function Invoke-GitHubPublicApi {
+    param(
+        [Parameter(Mandatory)][string] $Uri,
+        [switch] $Retry
+    )
+
+    $headers = @{
+        Accept                 = 'application/vnd.github+json'
+        'X-GitHub-Api-Version' = '2022-11-28'
+        'User-Agent'           = 'docker-github-runner'
+    }
+    $attempts = if ($Retry) { [int](Get-EnvironmentValue GH_API_RETRIES '6') } else { 1 }
+    $delay = [int](Get-EnvironmentValue GH_API_INITIAL_DELAY '1')
+    $backoff = [int](Get-EnvironmentValue GH_API_BACKOFF_MULT '2')
+
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        try {
+            return Invoke-RestMethod -Method GET -Uri $Uri -Headers $headers
+        }
+        catch {
+            if ($attempt -eq $attempts) { throw }
+            Write-Log "Public GitHub API request failed (attempt $attempt/$attempts); retrying in $delay second(s)"
+            Start-Sleep -Seconds $delay
+            $delay *= $backoff
+        }
+    }
+}
+
 function Invoke-RunnerCommand {
     param(
         [Parameter(Mandatory)][string] $Command,
@@ -327,16 +355,34 @@ function Remove-RunnerRegistration {
 try {
     $secretsFile = 'C:\run\secrets\credentials'
     if (Test-Path -LiteralPath $secretsFile -PathType Leaf) {
-        $tokenLine = Get-Content -LiteralPath $secretsFile |
-            Where-Object { $_ -match '^\s*GITHUB_TOKEN\s*[:=]' } |
-            Select-Object -Last 1
+        Write-Log "Credentials file exists at $secretsFile"
+        try {
+            $credentialLines = @(Get-Content -LiteralPath $secretsFile -ErrorAction Stop |
+                ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') })
+        }
+        catch {
+            throw "Credentials file exists but cannot be read: $($_.Exception.Message)"
+        }
+        $tokenLines = @($credentialLines | Where-Object { $_ -match '^GITHUB_TOKEN\s*[:=]' })
+        $tokenLine = if ($tokenLines.Count -gt 0) { $tokenLines[-1] } else { $null }
         if ($null -ne $tokenLine) {
-            $env:GITHUB_TOKEN = ($tokenLine -replace '^\s*GITHUB_TOKEN\s*[:=]\s*', '').Trim()
+            $env:GITHUB_TOKEN = ($tokenLine -replace '^GITHUB_TOKEN\s*[:=]\s*', '').Trim()
+        }
+        elseif ($credentialLines.Count -eq 1) {
+            $env:GITHUB_TOKEN = $credentialLines[0]
+        }
+        elseif ($credentialLines.Count -gt 1) {
+            throw 'Credentials file has multiple unrecognized lines; expected GITHUB_TOKEN=value or a single raw token'
+        }
+        if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
             Write-Log "Using GITHUB_TOKEN from $secretsFile (masked: $(Get-MaskedToken $env:GITHUB_TOKEN))"
+        }
+        else {
+            Write-Log 'Credentials file is empty or has no GITHUB_TOKEN value; using the environment variable if provided'
         }
     }
     else {
-        Write-Log "No credentials file at $secretsFile; using the environment variable if provided"
+        Write-Log "Credentials file not found at $secretsFile; using the environment variable if provided"
     }
 
     foreach ($requiredVariable in 'GITHUB_TOKEN', 'REPO_URL', 'RUNNER_NAME') {
@@ -389,7 +435,13 @@ try {
     }
 
     Write-Log 'Determining runner asset (win x64) from GitHub Releases API'
-    $release = Invoke-GitHubApi -Method GET -Uri 'https://api.github.com/repos/actions/runner/releases/latest' -Retry
+    try {
+        $release = Invoke-GitHubApi -Method GET -Uri 'https://api.github.com/repos/actions/runner/releases/latest' -Retry
+    }
+    catch {
+        Write-Log 'Authenticated release lookup was unavailable; retrying without authentication'
+        $release = Invoke-GitHubPublicApi -Uri 'https://api.github.com/repos/actions/runner/releases/latest' -Retry
+    }
     $runnerAsset = $release.assets |
         Where-Object name -Match '^actions-runner-win-x64-.*\.zip$' |
         Select-Object -First 1
@@ -430,8 +482,17 @@ try {
         }
     }
 
-    Write-Log "Requesting registration token from GitHub API ($apiRegistrationUrl)"
-    $registration = Invoke-GitHubApi -Method POST -Uri $apiRegistrationUrl -Retry
+    Write-Log "Checking GITHUB_TOKEN authentication and permissions while requesting registration token ($apiRegistrationUrl)"
+    try {
+        $registration = Invoke-GitHubApi -Method POST -Uri $apiRegistrationUrl -Retry
+    }
+    catch {
+        $statusCode = if ($null -ne $_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+        if ($statusCode -gt 0) {
+            throw "GitHub registration-token request failed (HTTP $statusCode); check GITHUB_TOKEN validity, scope, and repository or organization access"
+        }
+        throw "GitHub registration-token request failed; check GITHUB_TOKEN validity, permissions, and network access: $($_.Exception.Message)"
+    }
     if ([string]::IsNullOrWhiteSpace($registration.token)) { throw 'GitHub returned an empty registration token' }
     Write-Log "Obtained registration token (masked: $(Get-MaskedToken $registration.token)); expires at $($registration.expires_at)"
 

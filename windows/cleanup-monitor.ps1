@@ -189,11 +189,15 @@ function Remove-GitHubRunner {
 
 $secretsFile = 'C:\run\secrets\credentials'
 if (Test-Path -LiteralPath $secretsFile -PathType Leaf) {
-    $tokenLine = Get-Content -LiteralPath $secretsFile |
-        Where-Object { $_ -match '^\s*GITHUB_TOKEN\s*[:=]' } |
-        Select-Object -Last 1
+    $credentialLines = @(Get-Content -LiteralPath $secretsFile |
+        ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') })
+    $tokenLines = @($credentialLines | Where-Object { $_ -match '^GITHUB_TOKEN\s*[:=]' })
+    $tokenLine = if ($tokenLines.Count -gt 0) { $tokenLines[-1] } else { $null }
     if ($null -ne $tokenLine) {
         $env:GITHUB_TOKEN = ($tokenLine -replace '^\s*GITHUB_TOKEN\s*[:=]\s*', '').Trim()
+    }
+    elseif ($credentialLines.Count -eq 1) {
+        $env:GITHUB_TOKEN = $credentialLines[0]
     }
 }
 

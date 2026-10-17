@@ -23,6 +23,13 @@ http_get_json() {
     "$url"
 }
 
+http_get_public_json() {
+  local url="$1"
+  curl -fsS \
+    -H "Accept: application/vnd.github+json" \
+    "$url"
+}
+
 http_post_json() {
   local url="$1"
   curl -fsS -X POST \
@@ -51,6 +58,8 @@ with_retries_json() {
     set +e
     if [ "$method" = "GET" ]; then
       resp=$(http_get_json "$url" 2>/dev/null)
+    elif [ "$method" = "PUBLIC_GET" ]; then
+      resp=$(http_get_public_json "$url" 2>/dev/null)
     else
       resp=$(http_post_json "$url" 2>/dev/null)
     fi
@@ -108,21 +117,31 @@ fi
 # Read GITHUB_TOKEN from secret file (if present)
 # -------------------------
 SECRETS_FILE="/run/secrets/credentials"
-if [ -e "${SECRETS_FILE}" ] && [ -f "${SECRETS_FILE}" ] && [ -r "${SECRETS_FILE}" ] && [ -s "${SECRETS_FILE}" ]; then
-  token_from_file=$(
-    grep -E '^[[:space:]]*GITHUB_TOKEN[[:space:]]*[:=]' "${SECRETS_FILE}" 2>/dev/null \
-      | sed -E 's/^[[:space:]]*GITHUB_TOKEN[[:space:]]*[:=][[:space:]]*//' \
-      | tr -d '\r' \
-      | tail -n1 \
-      || true
-  )
-  if [ -n "${token_from_file:-}" ]; then
-    token_from_file=$(echo "${token_from_file}" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
-    export GITHUB_TOKEN="${token_from_file}"
-    log "Using GITHUB_TOKEN from ${SECRETS_FILE} (masked: $(mask_token "$GITHUB_TOKEN"))"
+if [ -e "${SECRETS_FILE}" ]; then
+  log "Credentials file exists at ${SECRETS_FILE}"
+  if [ ! -f "${SECRETS_FILE}" ]; then
+    log "Credentials path is not a regular file; using the environment variable if provided"
+  elif [ ! -r "${SECRETS_FILE}" ]; then
+    log "Credentials file is not readable; using the environment variable if provided"
+  else
+    token_from_file=$(awk '
+      { sub(/\r$/, ""); line=$0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line) }
+      line == "" || line ~ /^#/ { next }
+      line ~ /^GITHUB_TOKEN[[:space:]]*[:=]/ { sub(/^GITHUB_TOKEN[[:space:]]*[:=][[:space:]]*/, "", line); keyed=line; next }
+      { if (raw == "") raw=line; else raw="__multiple_lines__" }
+      END { if (keyed != "") print keyed; else if (raw != "") print raw }
+    ' "${SECRETS_FILE}")
+    if [ -n "${token_from_file:-}" ] && [ "${token_from_file}" != "__multiple_lines__" ]; then
+      export GITHUB_TOKEN="${token_from_file}"
+      log "Parsed GITHUB_TOKEN from ${SECRETS_FILE} (masked: $(mask_token "$GITHUB_TOKEN"))"
+    elif [ "${token_from_file:-}" = "__multiple_lines__" ]; then
+      log "Credentials file contains multiple unrecognized lines; expected GITHUB_TOKEN=value or a single raw token"
+    else
+      log "Credentials file is empty or has no GITHUB_TOKEN value; using the environment variable if provided"
+    fi
   fi
 else
-  log "No usable credentials file at ${SECRETS_FILE}; will use env var if provided"
+  log "Credentials file not found at ${SECRETS_FILE}; using the environment variable if provided"
 fi
 
 if [ -z "${GITHUB_TOKEN:-}" ]; then
@@ -191,8 +210,12 @@ fi
 # -------------------------
 # Download/refresh runner if needed
 # -------------------------
+RELEASE_API_URL="https://api.github.com/repos/actions/runner/releases/latest"
 log "Determining runner asset (linux x64) from GitHub Releases API"
-release_resp=$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" "https://api.github.com/repos/actions/runner/releases/latest")
+release_resp=$(with_retries_json GET "$RELEASE_API_URL") || {
+  log "Authenticated release lookup was unavailable; retrying without authentication"
+  release_resp=$(with_retries_json PUBLIC_GET "$RELEASE_API_URL")
+}
 RUNNER_URL_DL=$(echo "$release_resp" | jq -r '.assets[] | select(.name|test("linux-x64")) | .browser_download_url' | head -n1)
 RUNNER_TAR=$(echo "$release_resp" | jq -r '.assets[] | select(.name|test("linux-x64")) | .name' | head -n1)
 
@@ -228,13 +251,13 @@ fi
 # -------------------------
 # Register token
 # -------------------------
-log "Requesting registration token from GitHub API (${API_REG_URL})"
+log "Checking GITHUB_TOKEN authentication and permissions while requesting registration token (${API_REG_URL})"
 resp=$(with_retries_json POST "$API_REG_URL") || true
 TOKEN_TO_USE=$(echo "${resp:-}" | jq -r '.token' 2>/dev/null || true)
 expires_at=$(echo "${resp:-}" | jq -r '.expires_at' 2>/dev/null || true)
 
 if [ -z "${TOKEN_TO_USE:-}" ] || [ "${TOKEN_TO_USE}" = "null" ]; then
-  echo "ERROR: Failed to obtain registration token. Response:" >&2
+  echo "ERROR: Failed to obtain registration token; check GITHUB_TOKEN validity, scope, and network access. Response:" >&2
   echo "${resp:-<empty>}" >&2
   exit 1
 fi
