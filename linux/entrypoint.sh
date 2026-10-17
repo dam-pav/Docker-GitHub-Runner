@@ -281,13 +281,25 @@ if [ "${RUNNER_INSTANCES:-1}" -gt 1 ] && [ "$BASE_RUNNER_NAME" != "$RUNNER_NAME"
   STALE_RUNNER_NAMES+=("$BASE_RUNNER_NAME")
 fi
 set +e
-list_resp=$(http_get_json "$API_LIST_URL" 2>/dev/null)
+stale_ids=""
+page=1
+while :; do
+  list_resp=$(http_get_json "${API_LIST_URL}?per_page=100&page=${page}" 2>/dev/null)
+  page_ids=$(echo "${list_resp:-}" | jq -r --argjson names "$(printf '%s\n' "${STALE_RUNNER_NAMES[@]}" | jq -R . | jq -s .)" \
+    '.runners[]? | select(.name as $name | $names | index($name)) | .id' 2>/dev/null || true)
+  if [ -n "$page_ids" ]; then
+    stale_ids="${stale_ids}${page_ids}"$'\n'
+  fi
+  page_count=$(echo "${list_resp:-}" | jq '.runners | length' 2>/dev/null || echo 0)
+  if [ "$page_count" -lt 100 ]; then
+    break
+  fi
+  page=$((page + 1))
+done
 set -e
-for stale_name in "${STALE_RUNNER_NAMES[@]}"; do
-  stale_ids=$(echo "${list_resp:-}" | jq -r --arg name "$stale_name" '.runners[]? | select(.name==$name) | .id' 2>/dev/null || true)
-  for id in $stale_ids; do
-    http_delete "${API_DELETE_PREFIX}/${id}" || true
-  done
+
+for id in $stale_ids; do
+  http_delete "${API_DELETE_PREFIX}/${id}" || true
 done
 
 # -------------------------
