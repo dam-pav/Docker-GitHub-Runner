@@ -284,7 +284,7 @@ while :; do
   page_ids=$(echo "${list_resp:-}" | jq -r \
     --arg base "$BASE_RUNNER_NAME" \
     --arg active "$RUNNER_NAME" \
-    --argjson instances "$RUNNER_INSTANCES" \
+    --argjson instances "${RUNNER_INSTANCES:-1}" \
     '.runners[]? | .name as $name | select(
       $name == $active or
       ($instances > 1 and $name == $base) or
