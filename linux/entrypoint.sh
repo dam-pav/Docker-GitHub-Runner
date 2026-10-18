@@ -164,6 +164,7 @@ if ! [[ "${RUNNER_INSTANCES:-1}" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
+BASE_RUNNER_NAME="$RUNNER_NAME"
 if [ "${RUNNER_INSTANCES:-1}" -gt 1 ]; then
   RUNNER_ID=$(docker inspect \
     --format '{{ index .Config.Labels "com.docker.compose.container-number" }}' \
@@ -272,11 +273,36 @@ else
   COMBINED_LABELS="${HARD_LABELS}"
 fi
 
-# Best-effort delete stale runners by name (before re-register)
+# Best-effort delete stale runner registrations before re-registering. Also
+# prune names above the configured instance count so a scale-down can recover
+# registrations left behind if a removed container did not unregister cleanly.
 set +e
-list_resp=$(http_get_json "$API_LIST_URL" 2>/dev/null)
+stale_ids=""
+page=1
+while :; do
+  list_resp=$(http_get_json "${API_LIST_URL}?per_page=100&page=${page}" 2>/dev/null)
+  page_ids=$(echo "${list_resp:-}" | jq -r \
+    --arg base "$BASE_RUNNER_NAME" \
+    --arg active "$RUNNER_NAME" \
+    --argjson instances "${RUNNER_INSTANCES:-1}" \
+    '.runners[]? | .name as $name | select(
+      $name == $active or
+      ($instances > 1 and $name == $base) or
+      (($name | startswith($base + "_")) and
+       (($name | ltrimstr($base + "_")) | test("^[0-9]+$")) and
+       ((($name | ltrimstr($base + "_")) | tonumber) > $instances))
+    ) | .id' 2>/dev/null || true)
+  if [ -n "$page_ids" ]; then
+    stale_ids="${stale_ids}${page_ids}"$'\n'
+  fi
+  page_count=$(echo "${list_resp:-}" | jq '.runners | length' 2>/dev/null || echo 0)
+  if [ "$page_count" -lt 100 ]; then
+    break
+  fi
+  page=$((page + 1))
+done
 set -e
-stale_ids=$(echo "${list_resp:-}" | jq -r ".runners[]? | select(.name==\"${RUNNER_NAME}\") | .id" 2>/dev/null || true)
+
 for id in $stale_ids; do
   http_delete "${API_DELETE_PREFIX}/${id}" || true
 done
