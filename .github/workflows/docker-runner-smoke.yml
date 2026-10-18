@@ -1,0 +1,104 @@
+name: Docker runner smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  docker-smoke:
+    name: Docker and service smoke ${{ matrix.slot }}
+    runs-on: [self-hosted, linux, x64]
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        slot: [1, 2]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: smoke
+          POSTGRES_DB: smoke
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d smoke"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Check Docker socket and daemon
+        shell: bash
+        run: |
+          if [[ ! -S /var/run/docker.sock ]]; then
+            echo "Docker socket missing at /var/run/docker.sock; configure the socket mount from linux-compose.yml." >&2
+            exit 1
+          fi
+          if ! docker version; then
+            echo "Docker CLI cannot reach the host daemon; check socket permissions and the runner's socket group." >&2
+            exit 1
+          fi
+
+      - name: Reach the service through the Docker host gateway
+        shell: bash
+        env:
+          SERVICE_PORT: ${{ job.services.postgres.ports[5432] }}
+        run: |
+          gateway=$(ip -4 route show default | awk 'NR == 1 {print $3}')
+          if [[ -z "$gateway" ]]; then
+            echo "Could not find the Docker host gateway from the runner container's default route." >&2
+            ip -4 route >&2
+            exit 1
+          fi
+          if [[ -z "$SERVICE_PORT" ]]; then
+            echo "GitHub Actions did not provide a dynamically assigned PostgreSQL service port." >&2
+            exit 1
+          fi
+
+          echo "Checking PostgreSQL at $gateway:$SERVICE_PORT"
+          if ! docker run --rm --network host postgres:16-alpine \
+            pg_isready -h "$gateway" -p "$SERVICE_PORT" -U postgres -d smoke; then
+            echo "PostgreSQL is not reachable through the host gateway. Confirm service port publishing and runner-to-host routing." >&2
+            exit 1
+          fi
+          docker run --rm --network host postgres:16-alpine \
+            psql "host=$gateway port=$SERVICE_PORT user=postgres password=smoke dbname=smoke" \
+            -v ON_ERROR_STOP=1 -c 'SELECT 1'
+
+      - name: Write workspace smoke artifact
+        shell: bash
+        run: printf 'runner=%s slot=%s\n' "$RUNNER_NAME" "${{ matrix.slot }}" > "smoke-${{ matrix.slot }}.txt"
+
+      - name: Upload workspace artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-smoke-${{ matrix.slot }}
+          path: smoke-${{ matrix.slot }}.txt
+          if-no-files-found: error
+
+  verify-artifacts:
+    name: Verify workspace artifacts
+    needs: docker-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download both runner artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: docker-smoke-*
+          merge-multiple: true
+
+      - name: Check artifact contents
+        shell: bash
+        run: |
+          for slot in 1 2; do
+            file="smoke-$slot.txt"
+            if [[ ! -s "$file" ]]; then
+              echo "Workspace artifact $file is missing or empty." >&2
+              ls -la >&2
+              exit 1
+            fi
+            grep -q "slot=$slot" "$file" || {
+              echo "Workspace artifact $file has unexpected contents:" >&2
+              cat "$file" >&2
+              exit 1
+            }
+          done

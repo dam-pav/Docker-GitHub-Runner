@@ -173,6 +173,16 @@ While `/etc/github-runner` is the default host location, you can specify a diffe
 - On container start the entrypoint will (when run as root) detect the socket's group id, create a group in the container with that gid and add the `runner` user to it so the `runner` user can access the socket without running the runner as root.
 - If you still see permission errors, run the container with elevated privileges (e.g. `--privileged`) or check host socket permissions and the uid/gid mapping of `/var/run/docker.sock` on the host.
 
+#### Docker-backed workflow jobs
+
+The Linux runner talks to the host Docker daemon through `/var/run/docker.sock`. This means the runner process and Docker-created containers do not share the same network or filesystem namespace:
+
+- **Service containers:** For a job that runs directly on this runner (no `jobs.<job>.container`), a service container's mapped port is published by the host daemon. `localhost` inside the runner container is the runner container itself, not the host. Find the Docker host gateway from the runner container's default route and connect to that address and the dynamically assigned port in `job.services.<service>.ports`. A job that runs inside a job container has a different network setup; use the service hostname on the Actions network (for example, `postgres`) and the container port instead.
+- **Bind mounts:** `docker run -v "$GITHUB_WORKSPACE:/src"` sends a path to the host daemon. The daemon resolves it on the host, where the runner container's workspace path may not exist. A bind mount works only when the source path exists on the host and is mounted into the runner at the same absolute path. Ensure host-side ownership and permissions also allow the container process to read or write it. For small inputs, stream data with `docker cp` or stdin instead of adding a host bind mount.
+- **Parallel runners:** All runners on one host share the same Docker daemon. Use dynamically assigned service ports (for example, publish only `5432/tcp` and read the mapped port from the Actions service context), unique resource names, and cleanup disposable containers, networks, and volumes. Avoid fixed host ports and fixed Docker resource names.
+
+The opt-in [Docker workflow smoke example](.github/workflows/docker-runner-smoke.yml) runs two jobs concurrently, checks service reachability through the host gateway, runs a disposable PostgreSQL client container without bind mounts, and uploads/downloads workspace artifacts. Start it with **Actions → Docker runner smoke → Run workflow** on a repository where at least two Linux runners using this image are online. It reports specific diagnostics for a missing socket, unavailable daemon, inaccessible service, or missing artifact.
+
 ## Examples
 
 ### Per-runner env file + project name
