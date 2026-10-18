@@ -53,7 +53,7 @@ jobs:
         env:
           SERVICE_PORT: ${{ job.services.postgres.ports[5432] }}
         run: |
-          gateway_hex=$(awk '$2 == "00000000" && $3 != "00000000" && $4 ~ /0001/ {print $3; exit}' /proc/net/route)
+          gateway_hex=$(awk '$2 == "00000000" && $3 != "00000000" && $4 != "0000" {print $3; exit}' /proc/net/route)
           if [[ ! "$gateway_hex" =~ ^[[:xdigit:]]{8}$ ]]; then
             echo "Could not find the Docker host gateway from the runner container's default route." >&2
             cat /proc/net/route >&2
