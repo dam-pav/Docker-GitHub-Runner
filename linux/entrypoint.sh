@@ -273,29 +273,32 @@ else
   COMBINED_LABELS="${HARD_LABELS}"
 fi
 
-# Best-effort delete stale runner registrations before re-registering. Also
-# prune names above the configured instance count so a scale-down can recover
-# registrations left behind if a removed container did not unregister cleanly.
+# Best-effort delete stale registrations for the active name and, when scaling
+# up, the legacy unsuffixed name. Removed replicas unregister their exact names
+# in cleanup(); don't infer ownership from another runner's numeric suffix.
 set +e
 stale_ids=""
 page=1
 while :; do
-  list_resp=$(http_get_json "${API_LIST_URL}?per_page=100&page=${page}" 2>/dev/null)
+  if ! list_resp=$(http_get_json "${API_LIST_URL}?per_page=100&page=${page}" 2>/dev/null); then
+    log "Could not list runners; skipping stale-runner cleanup"
+    break
+  fi
+  if ! page_count=$(echo "$list_resp" | jq -er \
+    'if (.runners | type) == "array" then .runners | length else error("missing runners array") end' \
+    2>/dev/null); then
+    log "GitHub returned an invalid runner list; skipping stale-runner cleanup"
+    break
+  fi
   page_ids=$(echo "${list_resp:-}" | jq -r \
     --arg base "$BASE_RUNNER_NAME" \
     --arg active "$RUNNER_NAME" \
     --argjson instances "${RUNNER_INSTANCES:-1}" \
-    '.runners[]? | .name as $name | select(
-      $name == $active or
-      ($instances > 1 and $name == $base) or
-      (($name | startswith($base + "_")) and
-       (($name | ltrimstr($base + "_")) | test("^[0-9]+$")) and
-       ((($name | ltrimstr($base + "_")) | tonumber) > $instances))
-    ) | .id' 2>/dev/null || true)
+    '.runners[]? | select(.name == $active or ($instances > 1 and .name == $base)) | .id' \
+    2>/dev/null || true)
   if [ -n "$page_ids" ]; then
     stale_ids="${stale_ids}${page_ids}"$'\n'
   fi
-  page_count=$(echo "${list_resp:-}" | jq '.runners | length' 2>/dev/null || echo 0)
   if [ "$page_count" -lt 100 ]; then
     break
   fi
