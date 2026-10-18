@@ -181,7 +181,13 @@ The Linux runner talks to the host Docker daemon through `/var/run/docker.sock`.
 - **Bind mounts:** `docker run -v "$GITHUB_WORKSPACE:/src"` sends a path to the host daemon. The daemon resolves it on the host, where the runner container's workspace path may not exist. A bind mount works only when the source path exists on the host and is mounted into the runner at the same absolute path. Ensure host-side ownership and permissions also allow the container process to read or write it. For small inputs, stream data with `docker cp` or stdin instead of adding a host bind mount.
 - **Parallel runners:** All runners on one host share the same Docker daemon. Use dynamically assigned service ports (for example, publish only `5432/tcp` and read the mapped port from the Actions service context), unique resource names, and cleanup disposable containers, networks, and volumes. Avoid fixed host ports and fixed Docker resource names.
 
-The opt-in [Docker workflow smoke example](.github/workflows/docker-runner-smoke.yml) runs two jobs concurrently, checks service reachability through the host gateway, runs a disposable PostgreSQL client container without bind mounts, and uploads/downloads workspace artifacts. Start it with **Actions → Docker runner smoke → Run workflow** on a repository where at least two Linux runners using this image are online. It reports specific diagnostics for a missing socket, unavailable daemon, inaccessible service, or missing artifact.
+The opt-in [Docker workflow smoke example](.github/workflows/docker-runner-smoke.yml) checks Docker access in two preflight jobs, then runs two service jobs concurrently, probes service reachability from each runner, runs a disposable PostgreSQL client container without bind mounts, and uploads/downloads workspace artifacts. To run it:
+
+1. Make the workflow available on the repository's default branch (GitHub only enables manual dispatch for workflows present on the default branch).
+2. Ensure at least two Linux runners using this image are online for the repository, with Docker socket access. For example, set `RUNNER_INSTANCES=2` in the Linux Compose environment.
+3. In GitHub, open **Actions → Docker runner smoke → Run workflow**, choose the branch to run, and select **Run workflow**.
+
+The smoke jobs use a disposable PostgreSQL service and need no production credentials. Failures identify a missing or inaccessible Docker socket, missing host-gateway route, unreachable service, or missing artifact.
 
 ## Examples
 

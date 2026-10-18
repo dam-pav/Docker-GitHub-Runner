@@ -4,9 +4,31 @@ on:
   workflow_dispatch:
 
 jobs:
+  docker-preflight:
+    name: Docker socket preflight ${{ matrix.slot }}
+    runs-on: [self-hosted, linux, x64]
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        slot: [1, 2]
+    steps:
+      - name: Check Docker socket and daemon
+        shell: bash
+        run: |
+          if [[ ! -S /var/run/docker.sock ]]; then
+            echo "Docker socket missing at /var/run/docker.sock; configure the socket mount from linux-compose.yml." >&2
+            exit 1
+          fi
+          if ! docker version; then
+            echo "Docker CLI cannot reach the host daemon; check socket permissions and the runner's socket group." >&2
+            exit 1
+          fi
+
   docker-smoke:
     name: Docker and service smoke ${{ matrix.slot }}
     runs-on: [self-hosted, linux, x64]
+    needs: docker-preflight
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -26,35 +48,30 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     steps:
-      - name: Check Docker socket and daemon
-        shell: bash
-        run: |
-          if [[ ! -S /var/run/docker.sock ]]; then
-            echo "Docker socket missing at /var/run/docker.sock; configure the socket mount from linux-compose.yml." >&2
-            exit 1
-          fi
-          if ! docker version; then
-            echo "Docker CLI cannot reach the host daemon; check socket permissions and the runner's socket group." >&2
-            exit 1
-          fi
-
       - name: Reach the service through the Docker host gateway
         shell: bash
         env:
           SERVICE_PORT: ${{ job.services.postgres.ports[5432] }}
         run: |
-          gateway=$(ip -4 route show default | awk 'NR == 1 {print $3}')
-          if [[ -z "$gateway" ]]; then
+          gateway_hex=$(awk '$2 == "00000000" && $3 != "00000000" && $4 ~ /0001/ {print $3; exit}' /proc/net/route)
+          if [[ ! "$gateway_hex" =~ ^[[:xdigit:]]{8}$ ]]; then
             echo "Could not find the Docker host gateway from the runner container's default route." >&2
-            ip -4 route >&2
+            cat /proc/net/route >&2
             exit 1
           fi
+          gateway=$(printf '%d.%d.%d.%d' \
+            "$((16#${gateway_hex:6:2}))" "$((16#${gateway_hex:4:2}))" \
+            "$((16#${gateway_hex:2:2}))" "$((16#${gateway_hex:0:2}))")
           if [[ -z "$SERVICE_PORT" ]]; then
             echo "GitHub Actions did not provide a dynamically assigned PostgreSQL service port." >&2
             exit 1
           fi
 
           echo "Checking PostgreSQL at $gateway:$SERVICE_PORT"
+          if ! timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$gateway" "$SERVICE_PORT"; then
+            echo "Runner container cannot reach PostgreSQL at $gateway:$SERVICE_PORT. Check host-gateway routing and host firewall rules." >&2
+            exit 1
+          fi
           if ! docker run --rm --network host postgres:16-alpine \
             pg_isready -h "$gateway" -p "$SERVICE_PORT" -U postgres -d smoke; then
             echo "PostgreSQL is not reachable through the host gateway. Confirm service port publishing and runner-to-host routing." >&2
